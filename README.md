@@ -118,4 +118,4 @@ Résultats d'exécution et chiffres de référence : [docs/data-flow.md](docs/da
 
 ## Déploiement
 
-Dashboard : Vercel/Netlify (`dashboard/vercel.json`, `netlify.toml`). API : conteneur Mule CE (`mule/Dockerfile`) sur tout hébergeur de conteneurs avec volume. PostgreSQL managé avec TLS. Procédure complète et état réel (rien n'est déployé à ce stade) : [docs/deployment.md](docs/deployment.md).
+Serveur distant : mybestsim.duckdns.org
