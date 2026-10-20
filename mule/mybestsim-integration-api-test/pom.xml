@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.mycompany</groupId>
+	<artifactId>mybestsim-integration-api-test</artifactId>
+	<version>1.0.0-SNAPSHOT</version>
+	<packaging>mule-application</packaging>
+
+	<name>mybestsim-integration-api-test</name>
+
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+		<!-- Versions of the Studio project (Mule 4.7.0). Connector versions below are the ones shipped for 4.7.x. -->
+		<app.runtime>4.7.0</app.runtime>
+		<mule.maven.plugin.version>4.2.0</mule.maven.plugin.version>
+		<munit.version>3.2.1</munit.version>
+		<postgresql.version>42.7.4</postgresql.version>
+	</properties>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-clean-plugin</artifactId>
+				<version>3.2.0</version>
+			</plugin>
+			<plugin>
+				<groupId>org.mule.tools.maven</groupId>
+				<artifactId>mule-maven-plugin</artifactId>
+				<version>${mule.maven.plugin.version}</version>
+				<extensions>true</extensions>
+				<configuration>
+					<sharedLibraries>
+						<sharedLibrary>
+							<groupId>org.postgresql</groupId>
+							<artifactId>postgresql</artifactId>
+						</sharedLibrary>
+					</sharedLibraries>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>com.mulesoft.munit.tools</groupId>
+				<artifactId>munit-maven-plugin</artifactId>
+				<version>${munit.version}</version>
+				<executions>
+					<execution>
+						<id>test</id>
+						<phase>test</phase>
+						<goals>
+							<goal>test</goal>
+						</goals>
+					</execution>
+				</executions>
+				<configuration>
+					<runtimeProduct>MULE</runtimeProduct>
+					<runtimeVersion>${app.runtime}</runtimeVersion>
+					<!-- Placeholders of config/dev.yaml; fictitious values, no real database is contacted. -->
+					<systemPropertyVariables>
+						<mule.env>dev</mule.env>
+						<MYBESTSIM_HTTP_PORT>18081</MYBESTSIM_HTTP_PORT>
+						<MYBESTSIM_SOURCE_DIR>target/munit-incoming</MYBESTSIM_SOURCE_DIR>
+						<MYBESTSIM_PROCESSED_DIR>target/munit-processed</MYBESTSIM_PROCESSED_DIR>
+						<MYBESTSIM_REJECTED_DIR>target/munit-rejected</MYBESTSIM_REJECTED_DIR>
+						<MYBESTSIM_SCHEDULER_ENABLED>false</MYBESTSIM_SCHEDULER_ENABLED>
+						<MYBESTSIM_SCHEDULER_FREQUENCY_MS>3600000</MYBESTSIM_SCHEDULER_FREQUENCY_MS>
+						<MYBESTSIM_DB_HOST>localhost</MYBESTSIM_DB_HOST>
+						<MYBESTSIM_DB_PORT>5999</MYBESTSIM_DB_PORT>
+						<MYBESTSIM_DB_NAME>unit</MYBESTSIM_DB_NAME>
+						<MYBESTSIM_DB_USER>unit</MYBESTSIM_DB_USER>
+						<MYBESTSIM_DB_PASSWORD>unit</MYBESTSIM_DB_PASSWORD>
+						<MYBESTSIM_DB_SSLMODE>disable</MYBESTSIM_DB_SSLMODE>
+						<MYBESTSIM_API_BASE_URL>http://localhost:18081/api/v1</MYBESTSIM_API_BASE_URL>
+						<MYBESTSIM_ADMIN_API_KEY>unit-test-key</MYBESTSIM_ADMIN_API_KEY>
+						<MYBESTSIM_CORS_ALLOWED_ORIGIN>http://localhost:5173</MYBESTSIM_CORS_ALLOWED_ORIGIN>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.mule.connectors</groupId>
+			<artifactId>mule-http-connector</artifactId>
+			<version>1.9.3</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+		<dependency>
+			<groupId>org.mule.connectors</groupId>
+			<artifactId>mule-sockets-connector</artifactId>
+			<version>1.2.4</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+		<dependency>
+			<groupId>org.mule.connectors</groupId>
+			<artifactId>mule-file-connector</artifactId>
+			<version>1.5.2</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+		<dependency>
+			<groupId>org.mule.connectors</groupId>
+			<artifactId>mule-db-connector</artifactId>
+			<version>1.14.10</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+		<dependency>
+			<groupId>org.mule.modules</groupId>
+			<artifactId>mule-apikit-module</artifactId>
+			<version>1.10.4</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<version>${postgresql.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>com.mulesoft.munit</groupId>
+			<artifactId>munit-runner</artifactId>
+			<version>${munit.version}</version>
+			<classifier>mule-plugin</classifier>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.mulesoft.munit</groupId>
+			<artifactId>munit-tools</artifactId>
+			<version>${munit.version}</version>
+			<classifier>mule-plugin</classifier>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<repositories>
+		<repository>
+			<id>anypoint-exchange-v3</id>
+			<name>Anypoint Exchange</name>
+			<url>https://maven.anypoint.mulesoft.com/api/v3/maven</url>
+			<layout>default</layout>
+		</repository>
+		<repository>
+			<id>mulesoft-releases</id>
+			<name>MuleSoft Releases Repository</name>
+			<url>https://repository.mulesoft.org/releases/</url>
+			<layout>default</layout>
+		</repository>
+	</repositories>
+
+	<pluginRepositories>
+		<pluginRepository>
+			<id>mulesoft-releases</id>
+			<name>MuleSoft Releases Repository</name>
+			<layout>default</layout>
+			<url>https://repository.mulesoft.org/releases/</url>
+			<snapshots>
+				<enabled>false</enabled>
+			</snapshots>
+		</pluginRepository>
+	</pluginRepositories>
+
+</project>

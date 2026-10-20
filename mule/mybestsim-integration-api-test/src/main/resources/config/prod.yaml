@@ -1,0 +1,32 @@
+# Production configuration. Selected with -Dmule.env=prod.
+# Every environment-specific value is injected through environment variables / secrets of the hosting platform.
+mybestsim:
+  http:
+    port: "${MYBESTSIM_HTTP_PORT}"
+  source:
+    directory: "${MYBESTSIM_SOURCE_DIR}"        # e.g. /data/incoming (a mounted volume)
+  processed:
+    directory: "${MYBESTSIM_PROCESSED_DIR}"     # e.g. /data/processed
+  rejected:
+    directory: "${MYBESTSIM_REJECTED_DIR}"      # e.g. /data/rejected
+  scheduler:
+    enabled: "${MYBESTSIM_SCHEDULER_ENABLED}"
+    frequency-ms: "${MYBESTSIM_SCHEDULER_FREQUENCY_MS}"   # e.g. 86400000 (daily)
+    start-delay-ms: "60000"
+  db:
+    host: "${MYBESTSIM_DB_HOST}"
+    port: "${MYBESTSIM_DB_PORT}"
+    name: "${MYBESTSIM_DB_NAME}"
+    user: "${MYBESTSIM_DB_USER}"
+    password: "${MYBESTSIM_DB_PASSWORD}"
+    pool-max: "10"
+    required-schema-version: "4"
+    ssl-mode: "${MYBESTSIM_DB_SSLMODE}"          # require | verify-full ...
+  import:
+    allowed-currencies: "EUR"
+    lock-timeout-seconds: "1800"
+  api:
+    base-url: "${MYBESTSIM_API_BASE_URL}"
+  security:
+    admin-api-key: "${MYBESTSIM_ADMIN_API_KEY}"
+    cors-allowed-origin: "${MYBESTSIM_CORS_ALLOWED_ORIGIN}"   # the public dashboard origin

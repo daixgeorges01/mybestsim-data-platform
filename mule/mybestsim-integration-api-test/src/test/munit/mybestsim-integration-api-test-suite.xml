@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+    <munit:config name="mybestsim-integration-api-test-suite.xml"/>
+
+    <!-- ================= CSV validation (RowValidator.dwl) ================= -->
+    <munit:test name="validator-accepts-a-valid-numeric-row" description="A well-formed row is normalised and accepted">
+        <munit:execution>
+            <set-payload value="#[[{sku:'a-1', provider:'Prov', product_name:'eSIM France 5 Go 7 jours', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'12.50', currency:'EUR', network:'4G', top_up:'oui'}]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.result.rowsRead]" is="#[MunitTools::equalTo(1)]"/>
+            <munit-tools:assert-that expression="#[sizeOf(vars.result.valid)]" is="#[MunitTools::equalTo(1)]"/>
+            <munit-tools:assert-that expression="#[sizeOf(vars.result.rejected)]" is="#[MunitTools::equalTo(0)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].is_unlimited]" is="#[MunitTools::equalTo(false)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].data_gb as Number]" is="#[MunitTools::equalTo(5)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].price as Number]" is="#[MunitTools::equalTo(12.5)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].top_up]" is="#[MunitTools::equalTo(true)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-unlimited-offer-has-null-data-and-flag" description="Empty data_gb + 'Illimité' label = unlimited, not missing">
+        <munit:execution>
+            <set-payload value="#[[{sku:'u-1', provider:'Prov', product_name:'eSIM US Illimité 7 jours', country_code:'US', country_name:'États-Unis', data_gb:'', data_display:'Illimité', validity_days:'7', price:'35.14', currency:'EUR', network:'4G', top_up:'non'}]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[sizeOf(vars.result.valid)]" is="#[MunitTools::equalTo(1)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].is_unlimited]" is="#[MunitTools::equalTo(true)]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].data_gb]" is="#[MunitTools::nullValue()]"/>
+            <munit-tools:assert-that expression="#[vars.result.valid[0].top_up]" is="#[MunitTools::equalTo(false)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-missing-data-is-rejected-not-treated-as-unlimited" description="Empty data_gb without an unlimited label is a data error">
+        <munit:execution>
+            <set-payload value="#[[{sku:'m-1', provider:'Prov', product_name:'x', country_code:'FR', country_name:'France', data_gb:'', data_display:'N/A', validity_days:'7', price:'12.50', currency:'EUR', network:'4G', top_up:'oui'}]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[sizeOf(vars.result.valid)]" is="#[MunitTools::equalTo(0)]"/>
+            <munit-tools:assert-that expression="#[vars.result.rejected[0].errorCode]" is="#[MunitTools::equalTo('MISSING_DATA')]"/>
+            <munit-tools:assert-that expression="#[vars.result.rejected[0].rowNumber]" is="#[MunitTools::equalTo(2)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-rejects-invalid-rows-with-explicit-codes" description="Each invalid row is rejected with its own error code">
+        <munit:execution>
+            <set-payload value="#[[
+                {sku:'i-1', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'abc', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'i-2', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'-3', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'i-3', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'USD', network:'4G', top_up:'oui'},
+                {sku:'i-4', provider:'P', product_name:'x', country_code:'fr1', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'i-5', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'0', price:'3', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'i-6', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'EUR', network:'6G', top_up:'oui'},
+                {sku:'i-7', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'EUR', network:'4G', top_up:'??'},
+                {sku:'', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'i-9', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'Illimité', validity_days:'7', price:'3', currency:'EUR', network:'4G', top_up:'oui'}
+            ]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[sizeOf(vars.result.valid)]" is="#[MunitTools::equalTo(0)]"/>
+            <munit-tools:assert-that expression="#[vars.result.rejected map $.errorCode]"
+                                     is="#[MunitTools::equalTo(['INVALID_PRICE','INVALID_PRICE','INVALID_CURRENCY','INVALID_COUNTRY_CODE','INVALID_VALIDITY','INVALID_NETWORK','INVALID_TOP_UP','INVALID_SKU','INCONSISTENT_DATA'])]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-duplicate-sku-keeps-first-occurrence" description="Second occurrence of (provider, sku) is rejected">
+        <munit:execution>
+            <set-payload value="#[[
+                {sku:'d-1', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'3', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'d-1', provider:'P', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'99', currency:'EUR', network:'4G', top_up:'oui'},
+                {sku:'d-1', provider:'Q', product_name:'x', country_code:'FR', country_name:'France', data_gb:'5', data_display:'5 Go', validity_days:'7', price:'4', currency:'EUR', network:'4G', top_up:'oui'}
+            ]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.result.valid map ($.provider ++ ':' ++ ($.price as String))]" is="#[MunitTools::equalTo(['P:3','Q:4'])]"/>
+            <munit-tools:assert-that expression="#[vars.result.rejected[0].errorCode]" is="#[MunitTools::equalTo('DUPLICATE_SKU')]"/>
+            <munit-tools:assert-that expression="#[vars.result.rejected[0].rowNumber]" is="#[MunitTools::equalTo(3)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-detects-missing-columns-and-strips-bom" description="Header check ignores a UTF-8 BOM and reports missing columns">
+        <munit:execution>
+            <set-payload value="#[[{'﻿sku':'a-1', provider:'P', product_name:'x'}]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.result.missingColumns]"
+                                     is="#[MunitTools::equalTo(['country_code','country_name','data_gb','data_display','validity_days','price','currency','network','top_up'])]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="validator-empty-file-has-no-rows-and-no-header-error" description="A header-only file yields zero rows">
+        <munit:execution>
+            <set-payload value="#[[]]"/>
+            <set-variable variableName="result" value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, 'EUR')]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.result.rowsRead]" is="#[MunitTools::equalTo(0)]"/>
+            <munit-tools:assert-that expression="#[isEmpty(vars.result.missingColumns)]" is="#[MunitTools::equalTo(true)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ================= Dashboard flows (database mocked) ================= -->
+    <munit:test name="summary-flow-on-empty-database" description="Empty tables give hasData=false and null statistics, not an error">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{total_products: 0, over_100: 0, price_min: null, price_max: null, price_avg: null, data_avg_gb: null, numeric_data_count: 0, unlimited_count: 0, provider_count: 0, country_count: 0, currency: null}]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="get:\dashboard\summary:mybestsim-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.hasData]" is="#[MunitTools::equalTo(false)]"/>
+            <munit-tools:assert-that expression="#[payload.totalProducts]" is="#[MunitTools::equalTo(0)]"/>
+            <munit-tools:assert-that expression="#[payload.priceAvg]" is="#[MunitTools::nullValue()]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="summary-flow-maps-database-columns" description="Aggregates are mapped to the API contract">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{total_products: 10, over_100: 2, price_min: 5.36, price_max: 154.63, price_avg: 29.3013, data_avg_gb: 14.4915, numeric_data_count: 8, unlimited_count: 2, provider_count: 3, country_count: 4, currency: 'EUR'}]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="get:\dashboard\summary:mybestsim-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.hasData]" is="#[MunitTools::equalTo(true)]"/>
+            <munit-tools:assert-that expression="#[payload.productsOver100]" is="#[MunitTools::equalTo(2)]"/>
+            <munit-tools:assert-that expression="#[payload.unlimitedCount]" is="#[MunitTools::equalTo(2)]"/>
+            <munit-tools:assert-that expression="#[payload.dataAvgGb]" is="#[MunitTools::equalTo(14.4915)]"/>
+            <munit-tools:assert-that expression="#[payload.currency]" is="#[MunitTools::equalTo('EUR')]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="providers-flow-maps-rows" description="Provider breakdown mapping">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{provider:'Airalo', product_count: 722, share_percent: 14.28, price_avg: 20.1, price_min: 5.5, price_max: 99.9, unlimited_count: 90}]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="get:\dashboard\providers:mybestsim-config"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.items[0].provider]" is="#[MunitTools::equalTo('Airalo')]"/>
+            <munit-tools:assert-that expression="#[payload.items[0].productCount]" is="#[MunitTools::equalTo(722)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="summary-flow-propagates-database-connectivity-error" description="A DB outage surfaces as DB:CONNECTIVITY (mapped to HTTP 503 by the API error handler)"
+                expectedErrorType="DB:CONNECTIVITY">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:error typeId="DB:CONNECTIVITY"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="get:\dashboard\summary:mybestsim-config"/>
+        </munit:execution>
+    </munit:test>
+
+    <munit:test name="error-contract-maps-errors-to-http-status" description="Error identifiers map to the documented status codes">
+        <munit:execution>
+            <set-variable variableName="r" value="#[output application/java import dw::Responses --- {
+                db: Responses::errorStatus({errorType: {namespace: 'DB', identifier: 'CONNECTIVITY'}}),
+                auth: Responses::errorStatus({errorType: {namespace: 'MYBESTSIM', identifier: 'UNAUTHORIZED'}}),
+                busy: Responses::errorStatus({errorType: {namespace: 'MYBESTSIM', identifier: 'IMPORT_ALREADY_RUNNING'}}),
+                unknown: Responses::errorStatus({errorType: {namespace: 'MULE', identifier: 'EXPRESSION'}}),
+                body: Responses::errorBody({errorType: {namespace: 'MULE', identifier: 'EXPRESSION'}, description: 'secret sql details'})
+            }]"/>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.r.db]" is="#[MunitTools::equalTo(503)]"/>
+            <munit-tools:assert-that expression="#[vars.r.auth]" is="#[MunitTools::equalTo(401)]"/>
+            <munit-tools:assert-that expression="#[vars.r.busy]" is="#[MunitTools::equalTo(409)]"/>
+            <munit-tools:assert-that expression="#[vars.r.unknown]" is="#[MunitTools::equalTo(500)]"/>
+            <munit-tools:assert-that expression="#[vars.r.body.error.message]" is="#[MunitTools::equalTo('Unexpected error')]"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ================= Import flows (database mocked) ================= -->
+    <munit:test name="manual-import-requires-the-api-key" description="POST /imports without the key is refused before touching anything"
+                expectedErrorType="MYBESTSIM:UNAUTHORIZED">
+        <munit:execution>
+            <set-variable variableName="dummy" value="1"/>
+            <flow-ref name="post:\imports:mybestsim-config"/>
+        </munit:execution>
+    </munit:test>
+
+    <munit:test name="preflight-refuses-an-uninitialised-schema" description="Missing tables (migrations not applied) block the import"
+                expectedErrorType="MYBESTSIM:NOT_READY">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{tables_found: 2, has_history: false}]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="import-preflight-flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <munit:test name="preflight-refuses-an-outdated-schema" description="Applied migrations older than required block the import"
+                expectedErrorType="MYBESTSIM:NOT_READY">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:select">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{tables_found: 5, has_history: true, version: 1}]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="import-preflight-flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <munit:test name="lock-already-held-raises-import-already-running" description="A second concurrent batch is refused"
+                expectedErrorType="MYBESTSIM:IMPORT_ALREADY_RUNNING">
+        <munit:behavior>
+            <munit-tools:mock-when processor="db:delete">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[1]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="db:insert">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{affectedRows: 0}]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <set-variable variableName="batchId" value="00000000-0000-0000-0000-000000000000"/>
+            <flow-ref name="acquire-import-lock-flow"/>
+        </munit:execution>
+    </munit:test>
+</mule>

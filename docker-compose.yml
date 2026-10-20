@@ -1,0 +1,96 @@
+# Local services. Starting this stack creates an EMPTY database: nothing is imported.
+# - postgres : the catalogue database (persistent volume)
+# - migrate  : one-shot Flyway run applying database/migrations (structure only, no data)
+# - mule     : Mule runtime + API (built inside the image); import runs only on scheduler / POST /api/v1/imports
+# - dashboard: React dashboard served by nginx
+# `docker compose up -d --build` starts everything with an EMPTY catalogue: nothing is imported.
+name: mybestsim
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mybestsim-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mybestsim}
+      POSTGRES_USER: ${POSTGRES_USER:-mybestsim}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks: [mybestsim-net]
+
+  migrate:
+    image: flyway/flyway:11-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-mybestsim}
+      -user=${POSTGRES_USER:-mybestsim}
+      -password=${POSTGRES_PASSWORD}
+      -connectRetries=5
+      -locations=filesystem:/flyway/sql
+      migrate
+    volumes:
+      - ./database/migrations:/flyway/sql:ro
+    networks: [mybestsim-net]
+
+  # Mule can equally run on the host instead (scripts/run-mule.ps1); then start only: docker compose up -d postgres migrate
+  mule:
+    build:
+      context: .
+      dockerfile: mule/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      MYBESTSIM_DB_HOST: postgres
+      MYBESTSIM_DB_PORT: "5432"
+      MYBESTSIM_DB_NAME: ${POSTGRES_DB:-mybestsim}
+      MYBESTSIM_DB_USER: ${POSTGRES_USER:-mybestsim}
+      MYBESTSIM_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      MYBESTSIM_DB_SSLMODE: disable
+      MYBESTSIM_ADMIN_API_KEY: ${MYBESTSIM_ADMIN_API_KEY:?set MYBESTSIM_ADMIN_API_KEY in .env}
+      MYBESTSIM_CORS_ALLOWED_ORIGIN: ${MYBESTSIM_CORS_ALLOWED_ORIGIN:-http://localhost:5173}
+      MYBESTSIM_API_BASE_URL: http://localhost:8081/api/v1
+      MYBESTSIM_SCHEDULER_ENABLED: ${MYBESTSIM_SCHEDULER_ENABLED:-false}
+      MYBESTSIM_SCHEDULER_FREQUENCY_MS: ${MYBESTSIM_SCHEDULER_FREQUENCY_MS:-3600000}
+    ports:
+      - "${MULE_PORT:-8081}:8081"
+    volumes:
+      - ./data/incoming:/data/incoming
+      - ./data/processed:/data/processed
+      - ./data/rejected:/data/rejected
+    networks: [mybestsim-net]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+      args:
+        # URL of the API as seen by the BROWSER (build time)
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8081/api/v1}
+    restart: unless-stopped
+    depends_on:
+      - mule
+    ports:
+      - "${DASHBOARD_PORT:-5173}:80"
+    networks: [mybestsim-net]
+
+volumes:
+  postgres_data:
+
+networks:
+  mybestsim-net:
+    driver: bridge

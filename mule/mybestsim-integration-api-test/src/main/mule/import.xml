@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:file="http://www.mulesoft.org/schema/mule/file"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+    <!-- ===================================================================================
+         scheduled-import-flow : periodic trigger. Disabled unless mybestsim.scheduler.enabled=true.
+         ================================================================================== -->
+    <flow name="scheduled-import-flow">
+        <scheduler disallowConcurrentExecution="true">
+            <scheduling-strategy>
+                <fixed-frequency frequency="${mybestsim.scheduler.frequency-ms}"
+                                 startDelay="${mybestsim.scheduler.start-delay-ms}"/>
+            </scheduling-strategy>
+        </scheduler>
+        <choice>
+            <when expression="#[p('mybestsim.scheduler.enabled') == 'true']">
+                <set-variable variableName="trigger" value="SCHEDULER"/>
+                <flow-ref name="run-import-batch-flow"/>
+                <logger level="INFO" category="com.mybestsim.import"
+                        message="#['Scheduled import finished: ' ++ (sizeOf(payload.files) as String) ++ ' file(s), status=' ++ payload.status]"/>
+            </when>
+            <otherwise>
+                <logger level="DEBUG" category="com.mybestsim.import" message="Scheduler tick ignored (mybestsim.scheduler.enabled is not true)"/>
+            </otherwise>
+        </choice>
+        <error-handler>
+            <!-- A skipped or failed scheduled run is never fatal: the next tick retries. -->
+            <on-error-continue type="MYBESTSIM:NOT_READY, MYBESTSIM:IMPORT_ALREADY_RUNNING, DB:CONNECTIVITY">
+                <logger level="WARN" category="com.mybestsim.import"
+                        message="#['Scheduled import skipped: ' ++ (error.errorType.identifier default '') ++ ' - ' ++ (error.description default '')]"/>
+            </on-error-continue>
+            <on-error-continue type="ANY">
+                <logger level="ERROR" category="com.mybestsim.import"
+                        message="#['Scheduled import failed: ' ++ (error.errorType.identifier default '') ++ ' - ' ++ (error.description default '')]"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- Manual, protected trigger: POST /api/v1/imports -->
+    <flow name="post:\imports:mybestsim-config">
+        <choice>
+            <when expression="#[isEmpty(p('mybestsim.security.admin-api-key')) or (attributes.headers['x-api-key'] default '') != p('mybestsim.security.admin-api-key')]">
+                <raise-error type="MYBESTSIM:UNAUTHORIZED" description="Missing or invalid API key"/>
+            </when>
+        </choice>
+        <set-variable variableName="trigger" value="MANUAL"/>
+        <flow-ref name="run-import-batch-flow"/>
+    </flow>
+
+    <!-- ===================================================================================
+         run-import-batch-flow : preflight -> lock -> one process-provider-file-flow per CSV -> unlock
+         Output payload: ImportResult (see RAML).
+         ================================================================================== -->
+    <flow name="run-import-batch-flow">
+        <set-variable variableName="batchId" value="#[uuid()]"/>
+        <flow-ref name="import-preflight-flow"/>
+        <flow-ref name="acquire-import-lock-flow"/>
+        <try>
+            <flow-ref name="import-all-files-flow"/>
+            <error-handler>
+                <on-error-propagate type="ANY">
+                    <flow-ref name="release-import-lock-flow"/>
+                </on-error-propagate>
+            </error-handler>
+        </try>
+        <flow-ref name="release-import-lock-flow"/>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::batchResult(vars.batchId, vars.fileResults default [])]"/>
+    </flow>
+
+    <!-- Checks that the migrations are applied and the source directory is reachable. -->
+    <flow name="import-preflight-flow">
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT (SELECT count(*) FROM information_schema.tables
+                         WHERE table_schema = 'public'
+                           AND table_name IN ('providers', 'esim_products', 'import_runs', 'import_errors', 'import_lock')) AS tables_found,
+                       to_regclass('public.flyway_schema_history') IS NOT NULL AS has_history
+            ]]></db:sql>
+        </db:select>
+        <choice>
+            <when expression="#[payload[0].tables_found != 5]">
+                <raise-error type="MYBESTSIM:NOT_READY" description="Database schema is not initialised: apply the SQL migrations first"/>
+            </when>
+            <when expression="#[payload[0].has_history]">
+                <db:select config-ref="postgres-config">
+                    <db:sql><![CDATA[SELECT coalesce(max(CAST(version AS integer)), 0) AS version FROM flyway_schema_history WHERE success]]></db:sql>
+                </db:select>
+                <choice>
+                    <when expression="#[payload[0].version &lt; (p('mybestsim.db.required-schema-version') as Number)]">
+                        <raise-error type="MYBESTSIM:NOT_READY" description="Database schema is outdated: apply the pending SQL migrations"/>
+                    </when>
+                </choice>
+            </when>
+        </choice>
+        <try>
+            <file:list config-ref="source-file-config" directoryPath="." matcher="csv-matcher"/>
+            <error-handler>
+                <on-error-continue type="ANY">
+                    <logger level="ERROR" category="com.mybestsim.import"
+                            message="#['Source directory not accessible: ' ++ (error.description default '')]"/>
+                    <raise-error type="MYBESTSIM:NOT_READY" description="The source directory is not accessible"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- DB-level mutual exclusion (works across several Mule instances). -->
+    <flow name="acquire-import-lock-flow">
+        <db:delete config-ref="postgres-config">
+            <db:sql><![CDATA[DELETE FROM import_lock WHERE locked_at < now() - make_interval(secs => CAST(:timeout AS integer))]]></db:sql>
+            <db:input-parameters>#[{timeout: p('mybestsim.import.lock-timeout-seconds') as Number}]</db:input-parameters>
+        </db:delete>
+        <db:insert config-ref="postgres-config">
+            <db:sql><![CDATA[INSERT INTO import_lock (id, batch_id) VALUES (TRUE, CAST(:batchId AS uuid)) ON CONFLICT DO NOTHING]]></db:sql>
+            <db:input-parameters>#[{batchId: vars.batchId}]</db:input-parameters>
+        </db:insert>
+        <choice>
+            <when expression="#[payload.affectedRows == 0]">
+                <raise-error type="MYBESTSIM:IMPORT_ALREADY_RUNNING" description="Another import batch holds the lock"/>
+            </when>
+        </choice>
+        <!-- We hold the lock: any run still RUNNING is a leftover of a crashed batch. -->
+        <db:update config-ref="postgres-config">
+            <db:sql><![CDATA[
+                UPDATE import_runs
+                   SET status = 'FAILED', finished_at = now(),
+                       error_message = 'Interrupted: the import did not finish (closed by a later import)'
+                 WHERE status = 'RUNNING'
+            ]]></db:sql>
+        </db:update>
+    </flow>
+
+    <flow name="release-import-lock-flow">
+        <try>
+            <db:delete config-ref="postgres-config">
+                <db:sql><![CDATA[DELETE FROM import_lock WHERE batch_id = CAST(:batchId AS uuid)]]></db:sql>
+                <db:input-parameters>#[{batchId: vars.batchId}]</db:input-parameters>
+            </db:delete>
+            <error-handler>
+                <on-error-continue type="ANY">
+                    <logger level="ERROR" category="com.mybestsim.import"
+                            message="Could not release the import lock; it expires automatically after the configured timeout"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <flow name="import-all-files-flow">
+        <file:list config-ref="source-file-config" directoryPath="." matcher="csv-matcher"/>
+        <set-variable variableName="fileNames" value="#[(payload map ((m) -> m.attributes.fileName)) orderBy ((n) -> n)]"/>
+        <set-variable variableName="fileResults" value="#[[]]"/>
+        <logger level="INFO" category="com.mybestsim.import"
+                message="#['Import batch ' ++ vars.batchId ++ ' (' ++ vars.trigger ++ '): ' ++ (sizeOf(vars.fileNames) as String) ++ ' file(s) found']"/>
+        <foreach collection="#[vars.fileNames]">
+            <set-variable variableName="fileName" value="#[payload]"/>
+            <try>
+                <flow-ref name="process-provider-file-flow"/>
+                <error-handler>
+                    <!-- Without a database the batch cannot continue: abort and let the files stay in place. -->
+                    <on-error-propagate type="DB:CONNECTIVITY"/>
+                </error-handler>
+            </try>
+            <set-variable variableName="fileResults" value="#[vars.fileResults ++ [payload]]"/>
+        </foreach>
+    </flow>
+
+    <!-- ===================================================================================
+         process-provider-file-flow : one CSV file
+         in : vars.fileName, vars.batchId, vars.trigger     out : per-file result object
+         ================================================================================== -->
+    <flow name="process-provider-file-flow">
+        <logger level="INFO" category="com.mybestsim.import" message="#['Processing file ' ++ vars.fileName]"/>
+        <!-- 1. Create the run (committed immediately: it stays visible even if the rest fails). -->
+        <db:insert config-ref="postgres-config" autoGenerateKeys="true">
+            <db:sql><![CDATA[
+                INSERT INTO import_runs (batch_id, source_file, trigger_type)
+                VALUES (CAST(:batchId AS uuid), :file, :trigger)
+            ]]></db:sql>
+            <db:input-parameters>#[{batchId: vars.batchId, file: vars.fileName, trigger: vars.trigger}]</db:input-parameters>
+        </db:insert>
+        <set-variable variableName="runId" value="#[payload.generatedKeys.id]"/>
+        <set-variable variableName="archiveName"
+                      value="#[(vars.fileName replace /(?i)\.csv$/ with '') ++ '_' ++ (now() as String {format: &quot;yyyyMMdd'T'HHmmssSSS&quot;}) ++ '.csv']"/>
+        <set-variable variableName="allowedCurrencies" value="#[p('mybestsim.import.allowed-currencies')]"/>
+        <try>
+            <!-- 2. Read + parse + validate (DataWeave). -->
+            <file:read config-ref="source-file-config" path="#[vars.fileName]"
+                       outputMimeType="application/csv; header=true" outputEncoding="UTF-8"/>
+            <set-variable variableName="validation"
+                          value="#[output application/java import dw::RowValidator --- RowValidator::validateRows(payload, vars.allowedCurrencies)]"/>
+            <choice>
+                <when expression="#[!isEmpty(vars.validation.missingColumns)]">
+                    <raise-error type="MYBESTSIM:INVALID_FILE"
+                                 description="#['Missing required columns: ' ++ (vars.validation.missingColumns joinBy ', ')]"/>
+                </when>
+            </choice>
+            <!-- 3. Load valid rows, record rejected rows, finalise the run (one DB transaction). -->
+            <flow-ref name="load-products-flow"/>
+            <!-- 4. Archive: processed/ after SUCCESS or PARTIAL, rejected/ when the whole file failed. -->
+            <flow-ref name="archive-file-flow"/>
+            <error-handler>
+                <on-error-propagate type="DB:CONNECTIVITY"/>
+                <on-error-continue type="ANY">
+                    <logger level="ERROR" category="com.mybestsim.import"
+                            message="#['File ' ++ vars.fileName ++ ' failed: ' ++ (error.errorType.identifier default '') ++ ' - ' ++ (error.description default '')]"/>
+                    <flow-ref name="fail-file-flow"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- load-products-flow : atomic upsert + rejected rows + run counters. -->
+    <flow name="load-products-flow">
+        <try transactionalAction="ALWAYS_BEGIN">
+            <set-variable variableName="inserted" value="#[0]"/>
+            <set-variable variableName="updated" value="#[0]"/>
+            <choice>
+                <when expression="#[!isEmpty(vars.validation.valid)]">
+                    <!-- One parameterised statement: providers upsert + products upsert, idempotent.
+                         xmax = 0 identifies inserted rows; unchanged rows are not rewritten (IS DISTINCT FROM). -->
+                    <db:select config-ref="postgres-config">
+                        <db:sql><![CDATA[
+                            WITH incoming AS (
+                                SELECT * FROM jsonb_to_recordset(CAST(:rows AS jsonb)) AS r(
+                                    provider text, sku text, product_name text, country_code text, country_name text,
+                                    data_gb numeric, data_display text, is_unlimited boolean, validity_days integer,
+                                    price numeric, currency text, network text, top_up boolean)
+                            ),
+                            prov AS (
+                                INSERT INTO providers (name)
+                                SELECT DISTINCT provider FROM incoming
+                                ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+                                RETURNING id, name
+                            ),
+                            upserted AS (
+                                INSERT INTO esim_products (sku, provider_id, product_name, country_code, country_name,
+                                                           data_gb, data_display, is_unlimited, validity_days, price,
+                                                           currency, network, top_up, last_import_run_id)
+                                SELECT i.sku, p.id, i.product_name, i.country_code, i.country_name,
+                                       i.data_gb, i.data_display, i.is_unlimited, i.validity_days, i.price,
+                                       i.currency, i.network, i.top_up, CAST(:runId AS bigint)
+                                FROM incoming i JOIN prov p ON p.name = i.provider
+                                ON CONFLICT (provider_id, sku) DO UPDATE SET
+                                    product_name = EXCLUDED.product_name, country_code = EXCLUDED.country_code,
+                                    country_name = EXCLUDED.country_name, data_gb = EXCLUDED.data_gb,
+                                    data_display = EXCLUDED.data_display, is_unlimited = EXCLUDED.is_unlimited,
+                                    validity_days = EXCLUDED.validity_days, price = EXCLUDED.price,
+                                    currency = EXCLUDED.currency, network = EXCLUDED.network, top_up = EXCLUDED.top_up,
+                                    last_import_run_id = EXCLUDED.last_import_run_id
+                                WHERE (esim_products.product_name, esim_products.country_code, esim_products.country_name,
+                                       esim_products.data_gb, esim_products.data_display, esim_products.is_unlimited,
+                                       esim_products.validity_days, esim_products.price, esim_products.currency,
+                                       esim_products.network, esim_products.top_up)
+                                      IS DISTINCT FROM
+                                      (EXCLUDED.product_name, EXCLUDED.country_code, EXCLUDED.country_name,
+                                       EXCLUDED.data_gb, EXCLUDED.data_display, EXCLUDED.is_unlimited,
+                                       EXCLUDED.validity_days, EXCLUDED.price, EXCLUDED.currency,
+                                       EXCLUDED.network, EXCLUDED.top_up)
+                                RETURNING (xmax = 0) AS inserted
+                            )
+                            SELECT count(*) FILTER (WHERE inserted)     AS inserted_count,
+                                   count(*) FILTER (WHERE NOT inserted) AS updated_count
+                            FROM upserted
+                        ]]></db:sql>
+                        <db:input-parameters><![CDATA[#[{
+                            rows: write(vars.validation.valid, "application/json", {indent: false}),
+                            runId: vars.runId
+                        }]]]></db:input-parameters>
+                    </db:select>
+                    <set-variable variableName="inserted" value="#[payload[0].inserted_count]"/>
+                    <set-variable variableName="updated" value="#[payload[0].updated_count]"/>
+                </when>
+            </choice>
+            <choice>
+                <when expression="#[!isEmpty(vars.validation.rejected)]">
+                    <db:insert config-ref="postgres-config">
+                        <db:sql><![CDATA[
+                            INSERT INTO import_errors (import_run_id, source_file, row_number, sku, error_code, error_message)
+                            SELECT CAST(:runId AS bigint), :file, r.row_number, r.sku, r.error_code, r.error_message
+                            FROM jsonb_to_recordset(CAST(:errors AS jsonb))
+                                 AS r(row_number integer, sku text, error_code text, error_message text)
+                        ]]></db:sql>
+                        <db:input-parameters><![CDATA[#[import dw::Responses --- {
+                            runId: vars.runId,
+                            file: vars.fileName,
+                            errors: write(Responses::errorsJson(vars.validation.rejected), "application/json", {indent: false})
+                        }]]]></db:input-parameters>
+                    </db:insert>
+                </when>
+            </choice>
+            <!-- Status: SUCCESS (no rejection) | PARTIAL (some rows rejected) | FAILED (rows read but none valid). -->
+            <set-variable variableName="finalStatus"
+                          value="#[if (isEmpty(vars.validation.rejected)) 'SUCCESS' else if (isEmpty(vars.validation.valid)) 'FAILED' else 'PARTIAL']"/>
+            <set-variable variableName="finalMessage"
+                          value="#[if (vars.finalStatus == 'FAILED') 'No valid row in the file (see import_errors)' else if (vars.finalStatus == 'PARTIAL') (sizeOf(vars.validation.rejected) as String) ++ ' row(s) rejected (see import_errors)' else null]"/>
+            <db:update config-ref="postgres-config">
+                <db:sql><![CDATA[
+                    UPDATE import_runs
+                       SET status = :status, finished_at = now(), rows_read = :rowsRead,
+                           rows_inserted = :inserted, rows_updated = :updated, rows_rejected = :rejected,
+                           error_message = :message
+                     WHERE id = CAST(:runId AS bigint)
+                ]]></db:sql>
+                <db:input-parameters><![CDATA[#[{
+                    status: vars.finalStatus,
+                    rowsRead: vars.validation.rowsRead,
+                    inserted: vars.inserted,
+                    updated: vars.updated,
+                    rejected: sizeOf(vars.validation.rejected),
+                    message: vars.finalMessage,
+                    runId: vars.runId
+                }]]]></db:input-parameters>
+            </db:update>
+        </try>
+    </flow>
+
+    <!-- Moves the file out of the source directory (never deletes it). -->
+    <flow name="archive-file-flow">
+        <choice>
+            <when expression="#[!isEmpty(vars.validation.rejected)]">
+                <!-- Rejected rows are also written to a CSV next to the rejected files: nothing is lost silently. -->
+                <try>
+                    <set-payload value="#[output application/csv import dw::Responses --- Responses::rejectedRowsCsv(vars.validation.rejected)]"/>
+                    <file:write config-ref="rejected-file-config"
+                                path="#['rejected_rows_' ++ vars.archiveName]"
+                                createParentDirectories="true" mode="CREATE_NEW"/>
+                    <error-handler>
+                        <on-error-continue type="ANY">
+                            <logger level="ERROR" category="com.mybestsim.import"
+                                    message="#['Could not write the rejected rows file for ' ++ vars.fileName ++ ': ' ++ (error.description default '')]"/>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </when>
+        </choice>
+        <set-variable variableName="targetDir"
+                      value="#[if (vars.finalStatus == 'FAILED') p('mybestsim.rejected.directory') else p('mybestsim.processed.directory')]"/>
+        <try>
+            <file:move config-ref="source-file-config" sourcePath="#[vars.fileName]"
+                       targetPath="#[vars.targetDir]" renameTo="#[vars.archiveName]"
+                       createParentDirectories="true" overwrite="false"/>
+            <error-handler>
+                <on-error-continue type="ANY">
+                    <!-- Data is already committed; the file stays in place and will be re-imported idempotently. -->
+                    <logger level="ERROR" category="com.mybestsim.import"
+                            message="#['File ' ++ vars.fileName ++ ' was imported but could not be moved: ' ++ (error.description default '')]"/>
+                    <set-variable variableName="finalMessage" value="Imported but the source file could not be moved"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+        <set-payload value="#[{
+            sourceFile: vars.fileName,
+            status: vars.finalStatus,
+            rowsRead: vars.validation.rowsRead,
+            rowsInserted: vars.inserted,
+            rowsUpdated: vars.updated,
+            rowsRejected: sizeOf(vars.validation.rejected),
+            errorMessage: vars.finalMessage
+        }]"/>
+    </flow>
+
+    <!-- File-level failure: invalid header, unreadable file, SQL failure (transaction already rolled back). -->
+    <flow name="fail-file-flow">
+        <set-variable variableName="failCode"
+                      value="#[if (error.errorType.identifier == 'INVALID_FILE') 'INVALID_HEADER' else if (error.errorType.namespace == 'FILE') 'FILE_UNREADABLE' else if (error.errorType.namespace == 'DB') 'DATABASE_ERROR' else 'PROCESSING_ERROR']"/>
+        <!-- Messages stored (and exposed by the API) are generic: no paths, no SQL. Full details are in the Mule log. -->
+        <set-variable variableName="failMessage"
+                      value="#[if (vars.failCode == 'INVALID_HEADER') error.description else if (vars.failCode == 'FILE_UNREADABLE') 'The file could not be read' else if (vars.failCode == 'DATABASE_ERROR') 'The database rejected the load (transaction rolled back)' else 'Unexpected error while processing the file']"/>
+        <try transactionalAction="ALWAYS_BEGIN">
+            <db:update config-ref="postgres-config">
+                <db:sql><![CDATA[
+                    UPDATE import_runs
+                       SET status = 'FAILED', finished_at = now(), rows_read = :rowsRead, rows_inserted = 0,
+                           rows_updated = 0, rows_rejected = :rowsRead, error_message = :message
+                     WHERE id = CAST(:runId AS bigint)
+                ]]></db:sql>
+                <db:input-parameters>#[{rowsRead: vars.validation.rowsRead default 0, message: vars.failMessage, runId: vars.runId}]</db:input-parameters>
+            </db:update>
+            <db:insert config-ref="postgres-config">
+                <db:sql><![CDATA[
+                    INSERT INTO import_errors (import_run_id, source_file, row_number, sku, error_code, error_message)
+                    VALUES (CAST(:runId AS bigint), :file, NULL, NULL, :code, :message)
+                ]]></db:sql>
+                <db:input-parameters>#[{runId: vars.runId, file: vars.fileName, code: vars.failCode, message: vars.failMessage}]</db:input-parameters>
+            </db:insert>
+        </try>
+        <try>
+            <file:move config-ref="source-file-config" sourcePath="#[vars.fileName]"
+                       targetPath="${mybestsim.rejected.directory}" renameTo="#[vars.archiveName]"
+                       createParentDirectories="true" overwrite="false"/>
+            <error-handler>
+                <on-error-continue type="ANY">
+                    <logger level="ERROR" category="com.mybestsim.import"
+                            message="#['Could not move the failed file ' ++ vars.fileName ++ ' to the rejected directory: ' ++ (error.description default '')]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+        <set-payload value="#[{
+            sourceFile: vars.fileName,
+            status: 'FAILED',
+            rowsRead: vars.validation.rowsRead default 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+            rowsRejected: vars.validation.rowsRead default 0,
+            errorMessage: vars.failMessage
+        }]"/>
+    </flow>
+</mule>

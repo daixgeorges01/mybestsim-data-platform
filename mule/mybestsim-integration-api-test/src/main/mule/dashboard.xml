@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+    <!-- Every statistic is computed from PostgreSQL. Rules are documented in docs/api.md. -->
+
+    <flow name="get:\dashboard\summary:mybestsim-config">
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT count(*)                                   AS total_products,
+                       count(*) FILTER (WHERE price > 100)         AS over_100,
+                       min(price)                                  AS price_min,
+                       max(price)                                  AS price_max,
+                       round(avg(price), 4)                        AS price_avg,
+                       round(avg(data_gb), 4)                      AS data_avg_gb,
+                       count(data_gb)                              AS numeric_data_count,
+                       count(*) FILTER (WHERE is_unlimited)        AS unlimited_count,
+                       count(DISTINCT provider_id)                 AS provider_count,
+                       count(DISTINCT country_code)                AS country_count,
+                       CASE WHEN count(DISTINCT currency) = 1 THEN max(currency) END AS currency
+                FROM esim_products
+            ]]></db:sql>
+        </db:select>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::summary(payload)]"/>
+    </flow>
+
+    <flow name="get:\dashboard\providers:mybestsim-config">
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT pr.name                                                   AS provider,
+                       count(*)                                                  AS product_count,
+                       round(100.0 * count(*) / sum(count(*)) OVER (), 2)        AS share_percent,
+                       round(avg(p.price), 2)                                    AS price_avg,
+                       min(p.price)                                              AS price_min,
+                       max(p.price)                                              AS price_max,
+                       count(*) FILTER (WHERE p.is_unlimited)                    AS unlimited_count
+                FROM esim_products p
+                JOIN providers pr ON pr.id = p.provider_id
+                GROUP BY pr.name
+                ORDER BY product_count DESC, pr.name
+            ]]></db:sql>
+        </db:select>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::providers(payload)]"/>
+    </flow>
+
+    <flow name="get:\dashboard\prices:mybestsim-config">
+        <!-- Buckets are (min, max] : the upper bound is inclusive so that "> 100" matches the KPI "price > 100". -->
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                WITH b (ord, label, lo, hi) AS (
+                    VALUES (1, '0 – 10 €',    0,   10),
+                           (2, '10 – 20 €',   10,  20),
+                           (3, '20 – 30 €',   20,  30),
+                           (4, '30 – 50 €',   30,  50),
+                           (5, '50 – 75 €',   50,  75),
+                           (6, '75 – 100 €',  75,  100),
+                           (7, '> 100 €',     100, NULL)
+                )
+                SELECT b.label, b.lo AS min, b.hi AS max, count(p.id) AS count
+                FROM b
+                LEFT JOIN esim_products p
+                       ON p.price > b.lo - CASE WHEN b.ord = 1 THEN 1 ELSE 0 END
+                      AND (b.hi IS NULL OR p.price <= b.hi)
+                GROUP BY b.ord, b.label, b.lo, b.hi
+                ORDER BY b.ord
+            ]]></db:sql>
+        </db:select>
+        <set-variable variableName="bucketRows" value="#[payload]"/>
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT CASE WHEN count(DISTINCT currency) = 1 THEN max(currency) END AS currency FROM esim_products
+            ]]></db:sql>
+        </db:select>
+        <set-variable variableName="currency" value="#[payload[0].currency]"/>
+        <set-payload value="#[vars.bucketRows]"/>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::prices(payload, vars.currency)]"/>
+    </flow>
+
+    <flow name="get:\dashboard\data:mybestsim-config">
+        <db:select config-ref="postgres-config" target="dataRows">
+            <db:sql><![CDATA[
+                SELECT CASE WHEN is_unlimited THEN 'Illimité'
+                            ELSE CAST(trim_scale(data_gb) AS text) || ' Go' END AS label,
+                       data_gb, is_unlimited, count(*) AS count
+                FROM esim_products
+                GROUP BY is_unlimited, data_gb
+                ORDER BY is_unlimited, data_gb
+            ]]></db:sql>
+        </db:select>
+        <db:select config-ref="postgres-config" target="validityRows">
+            <db:sql><![CDATA[
+                SELECT validity_days || ' jours' AS label, count(*) AS count
+                FROM esim_products GROUP BY validity_days ORDER BY validity_days
+            ]]></db:sql>
+        </db:select>
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT network AS label, count(*) AS count FROM esim_products GROUP BY network ORDER BY network
+            ]]></db:sql>
+        </db:select>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::dataDistributions(vars.dataRows, vars.validityRows, payload)]"/>
+    </flow>
+
+    <flow name="get:\products:mybestsim-config">
+        <!-- Defaults are also declared in the RAML; ORDER BY comes from a closed whitelist (see dw/ProductQuery.dwl). -->
+        <set-variable variableName="page" value="#[(attributes.queryParams.page default '1') as Number]"/>
+        <set-variable variableName="pageSize" value="#[(attributes.queryParams.pageSize default '25') as Number]"/>
+        <set-variable variableName="filters" value="#[output application/java import dw::ProductQuery --- ProductQuery::filters(attributes.queryParams)]"/>
+        <db:select config-ref="postgres-config" target="totalItems" targetValue="#[payload[0].total]">
+            <db:sql>#[import dw::ProductQuery --- ProductQuery::countSql()]</db:sql>
+            <db:input-parameters><![CDATA[#[vars.filters]]]></db:input-parameters>
+        </db:select>
+        <db:select config-ref="postgres-config">
+            <db:sql>#[import dw::ProductQuery --- ProductQuery::pageSql(attributes.queryParams)]</db:sql>
+            <db:input-parameters><![CDATA[#[vars.filters ++ {limit: vars.pageSize, offset: (vars.page - 1) * vars.pageSize}]]]></db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::products(payload, vars.page, vars.pageSize, vars.totalItems as Number)]"/>
+    </flow>
+
+    <flow name="get:\imports\latest:mybestsim-config">
+        <!-- "Latest import" = the most recent batch (one scheduler / manual trigger), with one entry per file. -->
+        <db:select config-ref="postgres-config">
+            <db:sql><![CDATA[
+                SELECT r.batch_id, r.source_file, r.trigger_type, r.status, r.rows_read, r.rows_inserted,
+                       r.rows_updated, r.rows_rejected, r.error_message,
+                       (to_jsonb(r.started_at AT TIME ZONE 'UTC') #>> '{}') || 'Z' AS started_at,
+                       (to_jsonb(r.finished_at AT TIME ZONE 'UTC') #>> '{}') || 'Z' AS finished_at
+                FROM import_runs r
+                WHERE r.batch_id = (SELECT batch_id FROM import_runs ORDER BY started_at DESC, id DESC LIMIT 1)
+                ORDER BY r.started_at, r.id
+            ]]></db:sql>
+        </db:select>
+        <set-payload value="#[output application/json import dw::Responses --- Responses::latestImport(payload)]"/>
+    </flow>
+</mule>

@@ -1,0 +1,38 @@
+mybestsim:
+  http:
+    port: "8081"
+
+  source:
+    directory: "../data/incoming"
+
+  processed:
+    directory: "../data/processed"
+
+  rejected:
+    directory: "../data/rejected"
+
+  scheduler:
+    enabled: "false"
+    frequency-ms: "3600000"
+    start-delay-ms: "30000"
+
+  db:
+    host: "localhost"
+    port: "5433"
+    name: "mybestsim"
+    user: "mybestsim"
+    password: "change-me-local-only"
+    pool-max: "5"
+    required-schema-version: "4"
+    ssl-mode: "disable"
+
+  import:
+    allowed-currencies: "EUR"
+    lock-timeout-seconds: "1800"
+
+  api:
+    base-url: "http://localhost:8081/api/v1"
+
+  security:
+    admin-api-key: "dev-only-change-me"
+    cors-allowed-origin: "http://localhost:5173"

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:file="http://www.mulesoft.org/schema/mule/file"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd">
+
+    <!-- Environment selection: -Dmule.env=dev|prod (system property overrides this default). -->
+    <global-property name="mule.env" value="dev"/>
+    <configuration-properties file="config/${mule.env}.yaml"/>
+
+    <http:listener-config name="http-listener-config">
+        <http:listener-connection host="0.0.0.0" port="${mybestsim.http.port}"/>
+    </http:listener-config>
+
+    <apikit:config name="mybestsim-config" api="api/mybestsim-api.raml"
+                   outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus"/>
+
+    <db:config name="postgres-config">
+        <db:generic-connection
+                url="jdbc:postgresql://${mybestsim.db.host}:${mybestsim.db.port}/${mybestsim.db.name}?sslmode=${mybestsim.db.ssl-mode}&amp;connectTimeout=5&amp;loginTimeout=10&amp;socketTimeout=30"
+                driverClassName="org.postgresql.Driver"
+                user="${mybestsim.db.user}"
+                password="${mybestsim.db.password}">
+            <reconnection failsDeployment="false">
+                <reconnect count="2" frequency="2000"/>
+            </reconnection>
+            <db:pooling-profile maxPoolSize="${mybestsim.db.pool-max}" minPoolSize="0" acquireIncrement="1"/>
+        </db:generic-connection>
+    </db:config>
+
+    <!-- Source directory (CSV to import). Processed and rejected files are moved with absolute target paths. -->
+    <file:config name="source-file-config">
+        <file:connection workingDir="${mybestsim.source.directory}"/>
+    </file:config>
+    <file:config name="rejected-file-config">
+        <file:connection workingDir="${mybestsim.rejected.directory}"/>
+    </file:config>
+    <file:matcher name="csv-matcher" filenamePattern="*.{csv,CSV}" directories="EXCLUDE"/>
+</mule>

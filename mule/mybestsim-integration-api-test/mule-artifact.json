@@ -1,0 +1,9 @@
+{
+  "minMuleVersion": "4.7.0",
+  "requiredProduct": "MULE",
+  "javaSpecificationVersions": [
+    "1.8",
+    "11",
+    "17"
+  ]
+}

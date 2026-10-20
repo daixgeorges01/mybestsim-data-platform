@@ -1,0 +1,34 @@
+# Source data (CSV) is local only
+/data/*
+!/data/incoming/
+!/data/processed/
+!/data/rejected/
+/data/incoming/*
+/data/processed/*
+/data/rejected/*
+!/data/incoming/.gitkeep
+!/data/processed/.gitkeep
+!/data/rejected/.gitkeep
+
+# Secrets / local config
+.env
+.tar
+.dump
+config/application.yaml
+config/*.local.yaml
+mule/**/src/main/resources/config/*-local.yaml
+
+# Build output
+node_modules/
+dashboard/dist/
+dashboard/.env.local
+mule/**/target/
+*.jar
+.mule/
+.munit/
+
+# Local tooling / logs
+.tools/
+*.log
+.idea/
+.vscode/

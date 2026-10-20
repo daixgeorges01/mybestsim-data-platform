@@ -1,0 +1,33 @@
+# Reference of every property read by mybestsim-integration-api.
+# FICTITIOUS VALUES ONLY. The real files are src/main/resources/config/{dev,prod}.yaml, whose values are
+# placeholders resolved from environment variables (shown in comments). Never commit real secrets.
+mybestsim:
+  http:
+    port: 8081                                  # MYBESTSIM_HTTP_PORT
+  source:
+    directory: /data/incoming                   # MYBESTSIM_SOURCE_DIR   - CSV to import (seen BY the Mule runtime)
+  processed:
+    directory: /data/processed                  # MYBESTSIM_PROCESSED_DIR - files archived after SUCCESS / PARTIAL
+  rejected:
+    directory: /data/rejected                   # MYBESTSIM_REJECTED_DIR  - failed files + rejected-rows CSV
+  scheduler:
+    enabled: false                              # MYBESTSIM_SCHEDULER_ENABLED
+    frequency-ms: 86400000                      # MYBESTSIM_SCHEDULER_FREQUENCY_MS
+    start-delay-ms: 60000
+  db:
+    host: db.example.invalid                    # MYBESTSIM_DB_HOST
+    port: 5432                                  # MYBESTSIM_DB_PORT
+    name: mybestsim                             # MYBESTSIM_DB_NAME
+    user: mybestsim_app                         # MYBESTSIM_DB_USER
+    password: "change-me"                       # MYBESTSIM_DB_PASSWORD (secret)
+    ssl-mode: require                           # MYBESTSIM_DB_SSLMODE (disable | require | verify-full)
+    pool-max: 10
+    required-schema-version: 4                  # import refused while Flyway history is older
+  import:
+    allowed-currencies: EUR                     # comma separated; other currencies are rejected (averages stay meaningful)
+    lock-timeout-seconds: 1800                  # an import lock older than this is considered stale
+  api:
+    base-url: https://api.example.invalid/api/v1   # MYBESTSIM_API_BASE_URL
+  security:
+    admin-api-key: "change-me"                  # MYBESTSIM_ADMIN_API_KEY (secret, required for POST /imports)
+    cors-allowed-origin: https://dashboard.example.invalid   # MYBESTSIM_CORS_ALLOWED_ORIGIN
